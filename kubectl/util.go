@@ -11,7 +11,7 @@ import (
 )
 
 func Apply(resource string) *script.Pipe {
-	return script.Exec(fmt.Sprintf("kubectl apply -f %v", resource))
+	return script.Exec(fmt.Sprintf(`bash -c "echo '%v'| kubectl apply -f -"`, resource))
 }
 
 // resource needs to be in format resource/name eg pod/mypod01
@@ -25,7 +25,7 @@ func PortForwardPod(ctx context.Context, namespace, pod string, srcPort, destPor
 }
 
 func CopyToPod(namespace, pod, container, source, destination string) error {
-	out, err := script.Exec(fmt.Sprintf("kubectl -n %v cp %v %v:%v -c %v", namespace, source, pod, destination, container)).String()
+	out, err := script.Exec(fmt.Sprintf("kubectl -n %v cp %v %v:%v", namespace, source, pod, destination)).String()
 	if err != nil {
 		return errors.WithMessage(err, out)
 	}

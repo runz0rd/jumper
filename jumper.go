@@ -10,6 +10,7 @@ import (
 
 	"github.com/bitfield/script"
 	"github.com/pkg/errors"
+	"github.com/runz0rd/jumper/cmd"
 	"github.com/runz0rd/jumper/kubectl"
 )
 
@@ -23,14 +24,14 @@ const (
 var podYaml string
 
 func Run(ctx context.Context, idkey, user, host string, port int, sshArgs []string) error {
+	// spew.Dump(podYaml)
 	// create pod if not exists
-	if _, err := kubectl.Apply(podYaml).
-		WithStdout(os.Stdout).Stdout(); err != nil {
-		return err
+	out, err := kubectl.Apply(podYaml).String()
+	if err != nil {
+		return errors.WithMessage(err, out)
 	}
 	// wait for the pod to be ready
-	if _, err := kubectl.WaitResourceReady(defaultNamespace, fmt.Sprintf("pod/%v", defaultPod), "90s").
-		WithStdout(os.Stdout).Stdout(); err != nil {
+	if _, err := kubectl.WaitResourceReady(defaultNamespace, fmt.Sprintf("pod/%v", defaultPod), "90s").Stdout(); err != nil {
 		return err
 	}
 	// port forward into the pod
@@ -41,6 +42,10 @@ func Run(ctx context.Context, idkey, user, host string, port int, sshArgs []stri
 	if err != nil {
 		return err
 	}
+	defer func() {
+		os.Remove(idkeyServer)
+		os.Remove(pubkeyServer)
+	}()
 	// # Inject public SSH key to server
 	if err := kubectl.CopyToPod(defaultNamespace, defaultPod, "", pubkeyServer, "/root/.ssh/authorized_keys"); err != nil {
 		return err
@@ -53,18 +58,23 @@ func Run(ctx context.Context, idkey, user, host string, port int, sshArgs []stri
 }
 
 func sshViaProxy(idkey, user, host, idkeyServer string, port int, sshArgs []string) error {
-	proxyCmd := fmt.Sprintf(`ssh root@127.0.0.1 -p %v -i %v %v \"%v\"`, defaultLocalSSHPort, idkeyServer, strings.Join(sshArgs, " "), "nc %h %p")
-	cmd := fmt.Sprintf("ssh -i %v -p %v %v@%v -o ProxyCommand=%q %v", idkey, port, user, host, proxyCmd, strings.Join(sshArgs, " "))
-	if out, err := script.Exec(cmd).String(); err != nil {
-		return errors.WithMessage(err, out)
+	proxyCmd := fmt.Sprintf("ssh root@127.0.0.1 -p %v -i %v %v %q", defaultLocalSSHPort, idkeyServer, strings.Join(sshArgs, " "), "nc %h %p")
+	// c := fmt.Sprintf("ssh -i %v -p %v %v@%v -o ProxyCommand=%q %v", idkey, port, user, host, proxyCmd, strings.Join(sshArgs, " "))
+	_, err := cmd.New(os.Stdout, os.Stdin).WithDebug().
+		String("ssh -i %v -p %v %v@%v -o ProxyCommand='%v' %v", idkey, port, user, host, proxyCmd, strings.Join(sshArgs, " "))
+	if err != nil {
+		return err
 	}
+	// if out, err := script.Exec(c).String(); err != nil {
+	// 	return errors.WithMessage(err, out)
+	// }
 	return nil
 }
 
 func generateServerRSA(dir string) (idkey, pubkey string, err error) {
 	idkey = path.Join(dir, "id_rsa")
 	pubkey = path.Join(dir, "id_rsa.pub")
-	if out, err := script.Exec(fmt.Sprintf("ssh-keygen -t rsa -f %v -N ''", idkey)).String(); err != nil {
+	if out, err := script.Exec(fmt.Sprintf(`ssh-keygen -t rsa -f %v -N ''`, idkey)).String(); err != nil {
 		return idkey, pubkey, errors.WithMessage(err, out)
 	}
 	return idkey, pubkey, nil
