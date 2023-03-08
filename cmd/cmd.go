@@ -5,20 +5,25 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"strings"
+
+	"github.com/runz0rd/jumper/log"
+	"github.com/sirupsen/logrus"
 )
 
 type Cmd struct {
-	useDebug       bool
-	useBash        bool
-	ctx            context.Context
-	env            map[string]string
-	stdout, stderr io.Writer
+	*exec.Cmd
+	cmd      string
+	useDebug bool
+	useBash  bool
+	ctx      context.Context
+	env      map[string]string
 }
 
-func New(stdout, stderr io.Writer) *Cmd {
-	return &Cmd{env: make(map[string]string), stdout: stdout, stderr: stderr}
+func New(format string, a ...any) *Cmd {
+	return &Cmd{env: make(map[string]string), cmd: fmt.Sprintf(format, a...)}
 }
 
 func (c *Cmd) WithContext(ctx context.Context) *Cmd {
@@ -31,43 +36,44 @@ func (c *Cmd) WithEnv(env map[string]string) *Cmd {
 	return c
 }
 
-func (c *Cmd) WithDebug() *Cmd {
-	c.useDebug = true
-	return c
-}
-
 func (c *Cmd) WithBash() *Cmd {
 	c.useBash = true
 	return c
 }
 
-func (c *Cmd) String(format string, a ...any) (string, error) {
-	return c.exec(format, a...)
+func (c *Cmd) String() (string, error) {
+	return c.exec()
 }
 
-func (c *Cmd) Slice(format string, a ...any) ([]string, error) {
-	out, err := c.exec(format, a...)
+func (c *Cmd) Slice() ([]string, error) {
+	out, err := c.exec()
 	return strings.Split(out, "\n"), err
 }
 
-func (c *Cmd) exec(format string, a ...any) (string, error) {
-	cmdString := fmt.Sprintf(format, a...)
+func (c *Cmd) Kill() error {
+	return c.Process.Kill()
+}
+
+func (c *Cmd) exec() (string, error) {
+	cmdString := c.cmd
 	if c.useBash {
-		cmdString = fmt.Sprintf("bash -c %q", cmdString)
+		cmdString = fmt.Sprintf(`bash -c %v`, cmdString)
 	}
 	cmdSlice := strings.Split(cmdString, " ")
 	cmd := exec.Command(cmdSlice[0], cmdSlice[1:]...)
 	if c.ctx != nil {
 		cmd = exec.CommandContext(c.ctx, cmdSlice[0], cmdSlice[1:]...)
 	}
-	buf := &bytes.Buffer{}
-	cmd.Stdout = io.MultiWriter(buf, c.stdout)
-	cmd.Stderr = c.stderr
+	c.Cmd = cmd
+
+	combinedBuf := new(bytes.Buffer)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = io.MultiWriter(log.WriterLevel(logrus.DebugLevel), combinedBuf)
+	cmd.Stderr = io.MultiWriter(log.WriterLevel(logrus.DebugLevel), combinedBuf)
 	for k, v := range c.env {
 		cmd.Env = append(cmd.Env, fmt.Sprintf("%v=%v", k, v))
 	}
-	if c.useDebug {
-		fmt.Fprint(c.stdout, fmt.Sprintf("executing %q", cmdString))
-	}
-	return buf.String(), cmd.Run()
+	log.Log().Debugf("executing %q", cmdString)
+	err := cmd.Run()
+	return combinedBuf.String(), err
 }

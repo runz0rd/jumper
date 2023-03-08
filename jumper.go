@@ -8,10 +8,11 @@ import (
 	"path"
 	"strings"
 
-	"github.com/bitfield/script"
 	"github.com/pkg/errors"
 	"github.com/runz0rd/jumper/cmd"
 	"github.com/runz0rd/jumper/kubectl"
+	"github.com/runz0rd/jumper/log"
+	"github.com/sirupsen/logrus"
 )
 
 const (
@@ -23,67 +24,76 @@ const (
 //go:embed pod.yaml
 var podYaml string
 
-func Run(ctx context.Context, idkey, user, host string, port int, sshArgs []string) error {
-	// spew.Dump(podYaml)
-	// create pod if not exists
-	out, err := kubectl.Apply(podYaml).String()
-	if err != nil {
-		return errors.WithMessage(err, out)
+func Run(ctx context.Context, sshArgs []string, debug bool) error {
+	if debug {
+		log.SetLevel(logrus.DebugLevel)
 	}
+	// create pod if not exists
+	log.Log().Infof("creating jumper pod if it doesnt exist")
+	resource, err := kubectl.Create(podYaml)
+	if err != nil {
+		return err
+	}
+	defer kubectl.Delete(resource, false)
 	// wait for the pod to be ready
-	if _, err := kubectl.WaitResourceReady(defaultNamespace, fmt.Sprintf("pod/%v", defaultPod), "90s").Stdout(); err != nil {
+	log.Log().Infof("waiting for %v to get ready", resource)
+	if err := kubectl.WaitResourceReady(defaultNamespace, resource, "90s"); err != nil {
 		return err
 	}
 	// port forward into the pod
-	go portForwardPod(ctx)
+	log.Log().Infof("port-forwarding %v to %v", defaultLocalSSHPort, 22)
+
+	portForwardCmd := kubectl.PortForward(defaultNamespace, resource, defaultLocalSSHPort, 22)
+	go portForwardCmd.String()
+	defer portForwardCmd.Kill()
 
 	// # Generate temp private/public key to ssh to the server
+	log.Log().Infof("generating private/public keys for jumper server")
 	idkeyServer, pubkeyServer, err := generateServerRSA(".")
 	if err != nil {
 		return err
 	}
 	defer func() {
-		os.Remove(idkeyServer)
-		os.Remove(pubkeyServer)
+		if err := os.Remove(idkeyServer); err != nil {
+			log.Log().Infof("error removing server keys: %v", idkeyServer)
+		}
+		if err := os.Remove(pubkeyServer); err != nil {
+			log.Log().Infof("error removing server keys: %v", pubkeyServer)
+		}
 	}()
 	// # Inject public SSH key to server
-	if err := kubectl.CopyToPod(defaultNamespace, defaultPod, "", pubkeyServer, "/root/.ssh/authorized_keys"); err != nil {
+	log.Log().Infof("copyng public key to jumper server authorized keys")
+	if err := kubectl.CopyToPod(defaultNamespace, strings.TrimPrefix(resource, "pod/"), "", pubkeyServer, "/root/.ssh/authorized_keys"); err != nil {
 		return err
 	}
+	return nil
 	// # Using the SSH Server as a jumphost (via port-forward proxy), ssh into the desired Node
-	if err := sshViaProxy(idkey, user, host, idkeyServer, port, sshArgs); err != nil {
+	log.Log().Infof("running ssh via proxy command")
+	if err := sshViaProxy(idkeyServer, sshArgs); err != nil {
 		return err
 	}
 	return nil
 }
 
-func sshViaProxy(idkey, user, host, idkeyServer string, port int, sshArgs []string) error {
-	proxyCmd := fmt.Sprintf("ssh root@127.0.0.1 -p %v -i %v %v %q", defaultLocalSSHPort, idkeyServer, strings.Join(sshArgs, " "), "nc %h %p")
-	// c := fmt.Sprintf("ssh -i %v -p %v %v@%v -o ProxyCommand=%q %v", idkey, port, user, host, proxyCmd, strings.Join(sshArgs, " "))
-	_, err := cmd.New(os.Stdout, os.Stdin).WithDebug().
-		String("ssh -i %v -p %v %v@%v -o ProxyCommand='%v' %v", idkey, port, user, host, proxyCmd, strings.Join(sshArgs, " "))
+func sshViaProxy(idkeyServer string, sshArgs []string) error {
+	proxyCmd := fmt.Sprintf("ssh root@127.0.0.1 -p %v -i %v  %q", defaultLocalSSHPort, idkeyServer, "nc %h %p")
+	_, err := cmd.New("ssh %v ProxyCommand='%v'", strings.Join(sshArgs, " "), proxyCmd).String()
 	if err != nil {
 		return err
 	}
-	// if out, err := script.Exec(c).String(); err != nil {
-	// 	return errors.WithMessage(err, out)
-	// }
 	return nil
 }
 
 func generateServerRSA(dir string) (idkey, pubkey string, err error) {
 	idkey = path.Join(dir, "id_rsa")
 	pubkey = path.Join(dir, "id_rsa.pub")
-	if out, err := script.Exec(fmt.Sprintf(`ssh-keygen -t rsa -f %v -N ''`, idkey)).String(); err != nil {
+	_, errIdkey := os.Stat(idkey)
+	_, errPubkey := os.Stat(pubkey)
+	if errIdkey == nil && errPubkey == nil {
+		return idkey, pubkey, nil
+	}
+	if out, err := cmd.New(`ssh-keygen -t rsa -f %v -N ''`, idkey).String(); err != nil {
 		return idkey, pubkey, errors.WithMessage(err, out)
 	}
 	return idkey, pubkey, nil
-}
-
-func portForwardPod(ctx context.Context) error {
-	cmd := kubectl.PortForwardPod(ctx, defaultNamespace, defaultPod, defaultLocalSSHPort, 22)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	_, err := cmd.Output()
-	return err
 }
