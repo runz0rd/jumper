@@ -3,7 +3,7 @@ package kubectl
 import (
 	"fmt"
 	"os"
-	"path"
+	"path/filepath"
 	"strings"
 
 	"github.com/pkg/errors"
@@ -11,7 +11,7 @@ import (
 )
 
 func Apply(resource string) (string, error) {
-	fp := path.Join(os.TempDir(), "res.yaml")
+	fp := filepath.Join(os.TempDir(), "res.yaml")
 	if err := os.WriteFile(fp, []byte(resource), 0644); err != nil {
 		return "", err
 	}
@@ -19,7 +19,7 @@ func Apply(resource string) (string, error) {
 }
 
 func Create(resource string) (name string, err error) {
-	fp := path.Join(os.TempDir(), "res.yaml")
+	fp := filepath.Join(os.TempDir(), "res.yaml")
 	if err := os.WriteFile(fp, []byte(resource), 0644); err != nil {
 		return "", err
 	}

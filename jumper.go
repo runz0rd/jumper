@@ -6,7 +6,7 @@ import (
 	_ "embed"
 	"os"
 	"os/signal"
-	"path"
+	"path/filepath"
 	"strings"
 	"text/template"
 
@@ -103,8 +103,8 @@ func sshViaProxy(config string, sshArgs []string) error {
 }
 
 func generateServerRSA(dir string) (idkey, pubkey string, err error) {
-	idkey = path.Join(dir, "id_rsa")
-	pubkey = path.Join(dir, "id_rsa.pub")
+	idkey = filepath.Join(dir, "id_rsa")
+	pubkey = filepath.Join(dir, "id_rsa.pub")
 	os.Remove(idkey)
 	os.Remove(pubkey)
 	if out, err := cmd.New("ssh-keygen", "-t", "rsa", "-N", "", "-f", idkey).String(); err != nil {
@@ -151,7 +151,7 @@ func renderConfig(c configValues) (string, error) {
 }
 
 func writeTempFile(data []byte, name string) (string, error) {
-	fp := path.Join(os.TempDir(), name)
+	fp := filepath.Join(os.TempDir(), name)
 	err := os.WriteFile(fp, data, 0644)
 	return fp, err
 }
