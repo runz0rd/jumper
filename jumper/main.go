@@ -16,7 +16,13 @@ func main() {
 	ctx, ctxCancel := context.WithCancel(context.Background())
 	defer ctxCancel()
 	defer ctx.Done()
-	if err := jumper.Run(ctx, os.Args[1:], false); err != nil {
+
+	debug := false
+	debugEnv := os.Getenv("DEBUG")
+	if debugEnv == "1" || debugEnv == "true" {
+		debug = true
+	}
+	if err := jumper.Run(ctx, os.Args[1:], debug); err != nil {
 		log.Fatal(err)
 	}
 }
