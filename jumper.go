@@ -1,12 +1,14 @@
 package jumper
 
 import (
+	"bytes"
 	"context"
 	_ "embed"
-	"fmt"
 	"os"
+	"os/signal"
 	"path"
 	"strings"
+	"text/template"
 
 	"github.com/pkg/errors"
 	"github.com/runz0rd/jumper/cmd"
@@ -24,6 +26,9 @@ const (
 //go:embed pod.yaml
 var podYaml string
 
+//go:embed template.config
+var configTemplate string
+
 func Run(ctx context.Context, sshArgs []string, debug bool) error {
 	if debug {
 		log.SetLevel(logrus.DebugLevel)
@@ -34,6 +39,7 @@ func Run(ctx context.Context, sshArgs []string, debug bool) error {
 	if err != nil {
 		return err
 	}
+	go handleExit(resource)
 	defer kubectl.Delete(resource, false)
 	// wait for the pod to be ready
 	log.Log().Infof("waiting for %v to get ready", resource)
@@ -49,7 +55,7 @@ func Run(ctx context.Context, sshArgs []string, debug bool) error {
 
 	// # Generate temp private/public key to ssh to the server
 	log.Log().Infof("generating private/public keys for jumper server")
-	idkeyServer, pubkeyServer, err := generateServerRSA(".")
+	idkeyServer, pubkeyServer, err := generateServerRSA(os.TempDir())
 	if err != nil {
 		return err
 	}
@@ -62,24 +68,36 @@ func Run(ctx context.Context, sshArgs []string, debug bool) error {
 		}
 	}()
 	// # Inject public SSH key to server
-	log.Log().Infof("copyng public key to jumper server authorized keys")
-	if err := kubectl.CopyToPod(defaultNamespace, strings.TrimPrefix(resource, "pod/"), "", pubkeyServer, "/root/.ssh/authorized_keys"); err != nil {
+	log.Log().Infof("add public key to jumper server authorized keys")
+	if err := AddPubkeyToPod(strings.TrimPrefix(resource, "pod/"), pubkeyServer); err != nil {
 		return err
 	}
-	return nil
+
+	podIP, err := kubectl.GetResourceIP(resource)
+	if err != nil {
+		return err
+	}
+	config, err := renderConfig(configValues{
+		IdentityFile: idkeyServer,
+		HostName:     podIP,
+	})
+	if err != nil {
+		return err
+	}
 	// # Using the SSH Server as a jumphost (via port-forward proxy), ssh into the desired Node
 	log.Log().Infof("running ssh via proxy command")
-	if err := sshViaProxy(idkeyServer, sshArgs); err != nil {
+	if err := sshViaProxy(config, sshArgs); err != nil {
 		return err
 	}
 	return nil
 }
 
-func sshViaProxy(idkeyServer string, sshArgs []string) error {
-	proxyCmd := fmt.Sprintf("ssh root@127.0.0.1 -p %v -i %v  %q", defaultLocalSSHPort, idkeyServer, "nc %h %p")
-	_, err := cmd.New("ssh %v ProxyCommand='%v'", strings.Join(sshArgs, " "), proxyCmd).String()
+func sshViaProxy(config string, sshArgs []string) error {
+	c := []string{"ssh", "jumper", "-F", config}
+	c = append(c, sshArgs...)
+	out, err := cmd.New(c...).String()
 	if err != nil {
-		return err
+		return errors.WithMessage(err, string(out))
 	}
 	return nil
 }
@@ -87,13 +105,62 @@ func sshViaProxy(idkeyServer string, sshArgs []string) error {
 func generateServerRSA(dir string) (idkey, pubkey string, err error) {
 	idkey = path.Join(dir, "id_rsa")
 	pubkey = path.Join(dir, "id_rsa.pub")
-	_, errIdkey := os.Stat(idkey)
-	_, errPubkey := os.Stat(pubkey)
-	if errIdkey == nil && errPubkey == nil {
-		return idkey, pubkey, nil
-	}
-	if out, err := cmd.New(`ssh-keygen -t rsa -f %v -N ''`, idkey).String(); err != nil {
+	os.Remove(idkey)
+	os.Remove(pubkey)
+	if out, err := cmd.New("ssh-keygen", "-t", "rsa", "-N", "", "-f", idkey).String(); err != nil {
 		return idkey, pubkey, errors.WithMessage(err, out)
 	}
 	return idkey, pubkey, nil
+}
+
+func AddPubkeyToPod(pod, pubkeyServer string) error {
+	if err := kubectl.CopyToPod(defaultNamespace, pod, "", pubkeyServer, "/id_rsa.pub"); err != nil {
+		return err
+	}
+	return kubectl.ExecPod(pod, "cat /id_rsa.pub >> /root/.ssh/authorized_keys")
+}
+
+type configValues struct {
+	IdentityFile string
+	HostName     string
+}
+
+func renderTemplate(path string, values interface{}) (string, error) {
+	tpl, err := template.ParseFiles(path)
+	if err != nil {
+		return "", err
+	}
+	buf := new(bytes.Buffer)
+	err = tpl.Execute(buf, values)
+	if err != nil {
+		return "", err
+	}
+	return buf.String(), nil
+}
+
+func renderConfig(c configValues) (string, error) {
+	template, err := writeTempFile([]byte(configTemplate), "template.config")
+	if err != nil {
+		return "", err
+	}
+	configData, err := renderTemplate(template, c)
+	if err != nil {
+		return "", err
+	}
+	return writeTempFile([]byte(configData), "jumper.config")
+}
+
+func writeTempFile(data []byte, name string) (string, error) {
+	fp := path.Join(os.TempDir(), name)
+	err := os.WriteFile(fp, data, 0644)
+	return fp, err
+}
+
+func handleExit(resource string) {
+	signalChan := make(chan os.Signal, 1)
+	signal.Notify(signalChan, os.Interrupt)
+	<-signalChan
+	log.Log().Infof("exiting")
+	kubectl.Delete(resource, false)
+	os.Exit(0)
 }
